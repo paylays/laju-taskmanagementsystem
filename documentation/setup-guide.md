@@ -64,7 +64,7 @@ To see a blocked upload, upload a text file containing `LAJUR-SIMULATED-VIRUS`.
 
 ```bash
 cd backend  && php artisan test            # 61 tests, database lajur_test
-cd frontend && npm test                    # 37 tests
+cd frontend && npm test                    # 40 tests
 cd frontend && npx playwright install chromium && npm run test:e2e   # 6 tests; install once
 ```
 

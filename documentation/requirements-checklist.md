@@ -57,7 +57,7 @@ Each item in `Candidate-Instructions.md` with its status. Agreed scope: Parts 1,
 | Architecture decisions | Done | `architecture.md` |
 | Deployment guide | Not built | the app is not deployed; production notes (php-fpm, SSE hold time, Redis) are in `architecture.md` |
 | Backend unit, API, database, upload tests | Done | 61 PHPUnit tests in `backend/tests` |
-| Frontend component and API integration tests | Done | 37 Vitest tests in `frontend/tests/unit` |
+| Frontend component and API integration tests | Done | 40 Vitest tests in `frontend/tests/unit` |
 | E2E tests for critical flows | Done | 6 Playwright tests in `frontend/tests/e2e` |
 
 ## Submission

@@ -1,8 +1,8 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import { errorMessage, fieldErrors } from '../api/client'
-import { toast } from '../composables/useToasts'
+import { clearToastHost, setToastHost, toast } from '../composables/useToasts'
 import { auth } from '../stores/auth'
 import { PRIORITIES, STATUSES, plural } from '../utils/format'
 import AttachmentSection from './AttachmentSection.vue'
@@ -16,6 +16,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'created'])
 
 const dialog = ref(null)
+const toastSlot = ref(null)
 const thread = ref(null)
 
 const isNew = computed(() => props.taskId === null)
@@ -75,7 +76,11 @@ async function load() {
 }
 
 watch(() => props.taskId, load, { immediate: true })
-onMounted(() => dialog.value.showModal())
+onMounted(() => {
+  dialog.value.showModal()
+  setToastHost(toastSlot.value)
+})
+onBeforeUnmount(() => clearToastHost(toastSlot.value))
 
 async function save() {
   if (!form.title.trim()) {
@@ -295,6 +300,9 @@ defineExpose({ applyEvent })
           <CommentThread ref="thread" :task-id="task.id" />
         </template>
       </div>
+
+      <!-- ToastStack teleports here while the panel is open; see .toast-slot below. -->
+      <div ref="toastSlot" class="toast-slot"></div>
     </div>
   </dialog>
 </template>
@@ -321,6 +329,15 @@ defineExpose({ applyEvent })
   min-height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+/* Last in the flow and sticky, so toasts stay in view yet never cover the bottom controls for good:
+   scrolling to the end always lifts the last button above them. */
+.toast-slot {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin-top: auto;
 }
 
 .head {

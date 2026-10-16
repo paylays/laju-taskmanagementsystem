@@ -27,7 +27,7 @@ Rekaman layar sekitar 4 menit. Setiap langkah berisi apa yang dilakukan di layar
 | 11 | Kiri: klik **Export CSV**, lalu buka file yang terunduh. | Export CSV berjalan sebagai job di antrean. |
 | 12 | Kiri: buka DevTools, tampilan ponsel (sekitar 390px). Ketuk tab kolom. | Tampilan responsif: di ponsel, kolom berubah menjadi tab. |
 | 13 | Kiri: buka "Prepare sprint demo", **Delete task**, **Confirm delete**. Lalu **Sign out**. | Hapus task, lalu logout (token dicabut). |
-| 14 | Terminal: jalankan `php artisan test` (backend), lalu `npm test` (frontend). | 61 test backend dan 38 test frontend lulus. E2E: `npm run test:e2e`. |
+| 14 | Terminal: jalankan `php artisan test` (backend), lalu `npm test` (frontend). | 61 test backend dan 40 test frontend lulus. E2E: `npm run test:e2e`. |
 | 15 | Tunjukkan folder `documentation` dan `README.md`. | Dokumentasi: README, OpenAPI, skema database, arsitektur, panduan setup. |
 
 ## Opsional, kalau waktu cukup

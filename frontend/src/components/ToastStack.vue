@@ -1,28 +1,30 @@
 <script setup>
 import { useToasts } from '../composables/useToasts'
 
-const { toasts, dismissToast } = useToasts()
+const { toasts, dismissToast, host } = useToasts()
 
 const LABELS = { success: 'Success', info: 'Info', error: 'Error' }
 </script>
 
 <template>
-  <div class="toasts" aria-live="polite">
-    <div
-      v-for="t in toasts"
-      :key="t.id"
-      class="toast"
-      :class="`is-${t.kind}`"
-      :role="t.kind === 'error' ? 'alert' : 'status'"
-    >
-      <span class="marker" aria-hidden="true"></span>
-      <p>
-        <span class="label">{{ LABELS[t.kind] }}</span>
-        {{ t.message }}
-      </p>
-      <button type="button" class="close" :aria-label="`Close: ${t.message}`" @click="dismissToast(t.id)">Close</button>
+  <Teleport :to="host ?? 'body'">
+    <div class="toasts" :class="{ 'in-panel': host }" aria-live="polite">
+      <div
+        v-for="t in toasts"
+        :key="t.id"
+        class="toast"
+        :class="`is-${t.kind}`"
+        :role="t.kind === 'error' ? 'alert' : 'status'"
+      >
+        <span class="marker" aria-hidden="true"></span>
+        <p>
+          <span class="label">{{ LABELS[t.kind] }}</span>
+          {{ t.message }}
+        </p>
+        <button type="button" class="close" :aria-label="`Close: ${t.message}`" @click="dismissToast(t.id)">Close</button>
+      </div>
     </div>
-  </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -105,6 +107,29 @@ p {
     right: var(--space-2);
     left: var(--space-2);
     width: auto;
+  }
+}
+
+/* Inside the task panel's sticky slot: in the flow at the panel's bottom edge. */
+.toasts.in-panel {
+  position: static;
+  width: auto;
+  padding: 0 var(--space-4) calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+}
+
+.toasts.in-panel:empty {
+  display: none;
+}
+
+/* Wide screens leave room beside the panel, so the toasts sit there and cover nothing. */
+@media (min-width: 992px) {
+  .toasts.in-panel {
+    position: fixed;
+    left: var(--space-4);
+    right: auto;
+    bottom: calc(var(--space-4) + env(safe-area-inset-bottom, 0px));
+    width: min(24rem, calc(100vw - 36rem - 3rem));
+    padding: 0;
   }
 }
 </style>

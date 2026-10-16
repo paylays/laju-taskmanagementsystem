@@ -1,7 +1,19 @@
-import { reactive } from 'vue'
+import { reactive, ref } from 'vue'
 
 const toasts = reactive([])
 let nextId = 1
+
+// A modal <dialog> sits in the browser's top layer and makes the rest of the page inert,
+// so while one is open the toasts must render inside it to stay visible and clickable.
+const host = ref(null)
+
+export function setToastHost(element) {
+  host.value = element
+}
+
+export function clearToastHost(element) {
+  if (host.value === element) host.value = null
+}
 
 export function dismissToast(id) {
   const index = toasts.findIndex((t) => t.id === id)
@@ -21,5 +33,5 @@ export function toast(message, kind = 'info', timeout = 4000) {
 }
 
 export function useToasts() {
-  return { toasts, toast, dismissToast }
+  return { toasts, toast, dismissToast, host }
 }
