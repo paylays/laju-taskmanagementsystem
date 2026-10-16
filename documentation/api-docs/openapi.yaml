@@ -1,0 +1,684 @@
+openapi: 3.1.0
+info:
+  title: Lajur API
+  version: 1.0.0
+  description: |
+    REST API for the Lajur task board.
+
+    - Auth: `Authorization: Bearer <token>` on every endpoint except `POST /auth/login`.
+      `GET /stream` takes the token as `?token=` instead (EventSource cannot send headers).
+    - Send `Accept: application/json`. Errors are JSON with a `message`; 422 adds `errors` per field.
+    - Successful JSON GETs carry an `ETag`. Send it back as `If-None-Match` to get `304` with an empty body when nothing changed.
+servers:
+  - url: http://localhost:8000/api
+    description: Local (php artisan serve)
+
+tags:
+  - name: Auth
+  - name: Tasks
+  - name: Comments
+  - name: Attachments
+  - name: Exports
+  - name: Realtime
+  - name: Users
+
+security:
+  - bearer: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange email and password for a JWT
+      description: Rate limited to 10 attempts per minute per IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, example: admin@lajur.test }
+                password: { type: string, example: password }
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  token_type: { type: string, example: Bearer }
+                  expires_in: { type: integer, description: Seconds until the token expires, example: 7200 }
+                  user: { $ref: '#/components/schemas/User' }
+        '401':
+          description: Wrong email or password (same message for both)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { message: Email or password is incorrect. }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { description: Too many attempts }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current token
+      description: The token's `jti` is stored in `revoked_tokens`; the same token is rejected from then on.
+      responses:
+        '204': { description: Signed out }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      responses:
+        '200':
+          description: The signed-in user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /users:
+    get:
+      tags: [Users]
+      summary: Everyone on the team, ordered by name
+      description: Used to fill the assignee picker.
+      responses:
+        '200':
+          description: Users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/User' }
+
+  /tasks:
+    get:
+      tags: [Tasks]
+      summary: List tasks with filters, sorting and pagination
+      parameters:
+        - name: status
+          in: query
+          description: One or more statuses, comma separated (`todo,in_progress`) or as an array (`status[]=todo`).
+          schema: { type: string, example: 'todo,in_progress' }
+        - name: priority
+          in: query
+          description: One or more priorities, same formats as `status`.
+          schema: { type: string, example: high }
+        - name: assigned_user_id
+          in: query
+          schema: { type: integer }
+        - name: created_by
+          in: query
+          schema: { type: integer }
+        - name: search
+          in: query
+          description: Case-insensitive match on title or description. `%` and `_` are matched literally.
+          schema: { type: string, maxLength: 100 }
+        - name: due_from
+          in: query
+          schema: { type: string, format: date }
+        - name: due_to
+          in: query
+          schema: { type: string, format: date }
+        - name: sort
+          in: query
+          description: Field to sort by; prefix with `-` for descending. Priority sorts by weight (low < medium < high).
+          schema:
+            type: string
+            default: -created_at
+            enum: [created_at, -created_at, updated_at, -updated_at, due_date, -due_date, priority, -priority, status, -status, title, -title]
+        - name: per_page
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 15 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+      responses:
+        '200':
+          description: One page of tasks
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskPage' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    post:
+      tags: [Tasks]
+      summary: Create a task
+      description: The caller becomes `created_by`. If someone else is assigned, an email job is queued for them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskInput' }
+            example:
+              title: Rotate S3 access keys
+              priority: high
+              assigned_user_id: 3
+              due_date: '2026-11-01'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Task' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /tasks/{id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [Tasks]
+      summary: One task, including its attachments
+      responses:
+        '200':
+          description: The task
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Task' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Tasks]
+      summary: Update a task
+      description: |
+        Send only the fields that change. Allowed for admins, the creator, and the assignee.
+        A new assignee gets a queued email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskInput' }
+            example: { status: in_progress }
+      responses:
+        '200':
+          description: Updated task
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Task' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Tasks]
+      summary: Delete a task with its comments and files
+      description: Allowed for admins and the creator.
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tasks/bulk-status:
+    post:
+      tags: [Tasks]
+      summary: Queue a status change for many tasks
+      description: |
+        Runs in the `BulkUpdateTaskStatus` job; each task emits its own `task.updated` event.
+        Tasks the caller may not update are returned in `skipped`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, status]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items: { type: integer }
+                status: { $ref: '#/components/schemas/Status' }
+      responses:
+        '202':
+          description: Accepted and queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued: { type: array, items: { type: integer } }
+                  skipped: { type: array, items: { type: integer } }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /tasks/{id}/comments:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [Comments]
+      summary: Comments on a task, oldest first
+      responses:
+        '200':
+          description: Comments
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Comment' }
+    post:
+      tags: [Comments]
+      summary: Add a comment
+      description: Any signed-in user may comment on any task.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [comment]
+              properties:
+                comment: { type: string, maxLength: 5000 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Comment' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /tasks/{id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [Attachments]
+      summary: Upload a file to a task
+      description: |
+        Allowed for admins, the creator, and the assignee. The type is read from the file bytes, not the name.
+
+        | Category | Types | Max size |
+        |---|---|---|
+        | image | JPEG, PNG, GIF, WebP | 10 MB |
+        | document | PDF, TXT, CSV, DOC, DOCX, XLS, XLSX, PPTX | 20 MB |
+        | video | MP4, WebM, QuickTime | 50 MB |
+
+        Returns `scan_status: pending`. The `ProcessAttachment` job then scans the file (simulated)
+        and makes a 320px thumbnail for images.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        '201':
+          description: Stored, scan pending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Attachment' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: Missing file, type not allowed, or over the limit for its type
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ValidationError' }
+              example:
+                message: Files of type application/x-dosexec are not allowed.
+                errors: { file: [Files of type application/x-dosexec are not allowed.] }
+
+  /attachments/{id}/download:
+    parameters:
+      - $ref: '#/components/parameters/AttachmentId'
+    get:
+      tags: [Attachments]
+      summary: Download the original file
+      description: 'Sent with `Content-Disposition: attachment` and the original file name.'
+      responses:
+        '200':
+          description: File bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '409':
+          description: Still being scanned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: Failed the virus scan; the file was deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /attachments/{id}/thumbnail:
+    parameters:
+      - $ref: '#/components/parameters/AttachmentId'
+    get:
+      tags: [Attachments]
+      summary: 320px JPEG thumbnail (images only)
+      responses:
+        '200':
+          description: JPEG
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        '404': { description: No thumbnail for this attachment }
+
+  /attachments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/AttachmentId'
+    delete:
+      tags: [Attachments]
+      summary: Delete an attachment and its files
+      description: Allowed for admins, the uploader, and the task's creator.
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /exports:
+    post:
+      tags: [Exports]
+      summary: Start a CSV export
+      description: Accepts the same filters as `GET /tasks` (pagination is ignored). Runs in the `ExportTasks` job.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+                priority: { type: string }
+                assigned_user_id: { type: integer }
+                search: { type: string }
+                sort: { type: string }
+      responses:
+        '202':
+          description: Queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Export' }
+
+  /exports/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ExportId'
+    get:
+      tags: [Exports]
+      summary: Export status
+      description: Only the user who started the export can see it; others get 404.
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Export' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /exports/{id}/download:
+    parameters:
+      - $ref: '#/components/parameters/ExportId'
+    get:
+      tags: [Exports]
+      summary: Download a finished export
+      description: |
+        Columns: id, title, status, priority, assignee, creator, due_date, created_at.
+        Cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not run them as formulas.
+      responses:
+        '200':
+          description: CSV file
+          content:
+            text/csv:
+              schema: { type: string }
+        '409': { description: Not finished yet }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /stream:
+    get:
+      tags: [Realtime]
+      summary: Server-Sent Events feed of changes
+      description: |
+        Authenticate with `?token=<jwt>`.
+
+        - A new connection gets `retry:` and a `ready` event carrying the latest id; history is not replayed.
+        - On reconnect the browser sends `Last-Event-ID` and receives everything after it.
+        - Each connection closes after `SSE_HOLD_SECONDS` (0 locally); EventSource reconnects by itself.
+
+        Events:
+
+        | event | data |
+        |---|---|
+        | `task.created`, `task.updated` | `{ "task": Task }` |
+        | `task.deleted` | `{ "task_id": 12 }` |
+        | `comment.created` | `{ "task_id": 12, "comment": Comment }` |
+        | `attachment.created`, `attachment.updated` | `{ "task_id": 12, "attachment": Attachment }` |
+        | `attachment.deleted` | `{ "task_id": 12, "attachment_id": 4 }` |
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+        - name: Last-Event-ID
+          in: header
+          schema: { type: integer }
+        - name: last_event_id
+          in: query
+          description: Same as the header, for clients that cannot set it.
+          schema: { type: integer }
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+              example: |
+                retry: 2000
+
+                id: 41
+                event: comment.created
+                data: {"task_id":4,"comment":{"id":15,"task_id":4,"comment":"Test added.","user":{"id":2,"name":"Rina Pratama"},"created_at":"2026-10-16T12:00:00+00:00"}}
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: HS256 token from `POST /auth/login`. Lifetime is `JWT_TTL` minutes (default 120).
+
+  parameters:
+    TaskId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    AttachmentId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    ExportId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+
+  responses:
+    Unauthenticated:
+      description: Missing, expired, invalid, or revoked token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: Unauthenticated. }
+    Forbidden:
+      description: Signed in, but not allowed to do this
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: This action is unauthorized. }
+    NotFound:
+      description: No such record
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { message: Not found. }
+    ValidationError:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ValidationError' }
+
+  schemas:
+    Status:
+      type: string
+      enum: [todo, in_progress, done]
+    Priority:
+      type: string
+      enum: [low, medium, high]
+
+    Error:
+      type: object
+      properties:
+        message: { type: string }
+
+    ValidationError:
+      type: object
+      properties:
+        message: { type: string }
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+      example:
+        message: The title field is required.
+        errors: { title: [The title field is required.] }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [admin, member] }
+        created_at: { type: string, format: date-time }
+
+    TaskInput:
+      type: object
+      properties:
+        title: { type: string, maxLength: 255, description: Required on create }
+        description: { type: [string, 'null'], maxLength: 10000 }
+        status: { $ref: '#/components/schemas/Status' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        assigned_user_id: { type: [integer, 'null'] }
+        due_date: { type: [string, 'null'], format: date, example: '2026-11-01' }
+
+    Task:
+      type: object
+      properties:
+        id: { type: integer }
+        title: { type: string }
+        description: { type: [string, 'null'] }
+        status: { $ref: '#/components/schemas/Status' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        due_date: { type: [string, 'null'], format: date }
+        assigned_user_id: { type: [integer, 'null'] }
+        created_by: { type: integer }
+        assignee:
+          type: [object, 'null']
+          properties:
+            id: { type: integer }
+            name: { type: string }
+        creator:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+        attachments_count: { type: integer }
+        comments_count: { type: integer }
+        attachments:
+          type: array
+          description: Only on `GET /tasks/{id}`
+          items: { $ref: '#/components/schemas/Attachment' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    TaskPage:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Task' }
+        links:
+          type: object
+          properties:
+            first: { type: string }
+            last: { type: string }
+            prev: { type: [string, 'null'] }
+            next: { type: [string, 'null'] }
+        meta:
+          type: object
+          properties:
+            current_page: { type: integer }
+            last_page: { type: integer }
+            per_page: { type: integer }
+            total: { type: integer }
+            from: { type: [integer, 'null'] }
+            to: { type: [integer, 'null'] }
+
+    Attachment:
+      type: object
+      properties:
+        id: { type: integer }
+        task_id: { type: integer }
+        file_name: { type: string, description: 'Original name, used only in Content-Disposition' }
+        file_size: { type: integer, description: Bytes }
+        mime_type: { type: string, description: Detected from the file contents }
+        scan_status: { type: string, enum: [pending, clean, infected] }
+        has_thumbnail: { type: boolean }
+        uploaded_by: { type: [integer, 'null'] }
+        uploaded_at: { type: string, format: date-time }
+
+    Comment:
+      type: object
+      properties:
+        id: { type: integer }
+        task_id: { type: integer }
+        comment: { type: string }
+        user:
+          type: object
+          properties:
+            id: { type: integer }
+            name: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Export:
+      type: object
+      properties:
+        id: { type: integer }
+        status: { type: string, enum: [pending, processing, done, failed] }
+        row_count: { type: [integer, 'null'] }
+        created_at: { type: string, format: date-time }
